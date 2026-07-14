@@ -1,0 +1,53 @@
+{
+  "name": "rulecast",
+  "version": "0.1.0",
+  "description": "Compile CLAUDE.md, AGENTS.md, Cursor rules and Copilot instructions from one set of path-scoped fragments — with a lint pass and a CI drift check, not one-way file copying.",
+  "author": "JaydenCJ",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "rulecast": "dist/cli.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "examples",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test \"tests/*.test.mjs\"",
+    "smoke": "bash scripts/smoke.sh"
+  },
+  "keywords": [
+    "claude-code",
+    "agents-md",
+    "cursor-rules",
+    "copilot-instructions",
+    "ai-coding-rules",
+    "drift-check",
+    "cli"
+  ],
+  "devDependencies": {
+    "typescript": "^5.7.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/JaydenCJ/rulecast.git"
+  },
+  "homepage": "https://github.com/JaydenCJ/rulecast#readme",
+  "bugs": {
+    "url": "https://github.com/JaydenCJ/rulecast/issues"
+  }
+}

@@ -1,0 +1,135 @@
+#!/usr/bin/env bash
+# Smoke test for rulecast: exercises the real CLI end to end against a
+# fresh copy of the bundled example monorepo. No network, idempotent,
+# runs from a clean checkout (after `npm install`).
+# Prints "SMOKE OK" on success.
+set -euo pipefail
+
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
+ROOT="$(pwd)"
+
+WORKDIR="$(mktemp -d)"
+trap 'rm -rf "$WORKDIR"' EXIT
+
+fail() {
+  echo "SMOKE FAIL: $1" >&2
+  exit 1
+}
+
+# 1. Build (idempotent).
+npm run build >/dev/null 2>&1 || fail "npm run build failed"
+CLI="node $ROOT/dist/cli.js"
+echo "[smoke] build ok"
+
+# 2. --version matches package.json; --help documents the surface.
+PKG_VERSION="$(node -p "require('$ROOT/package.json').version")"
+CLI_VERSION="$($CLI --version)"
+[ "$CLI_VERSION" = "$PKG_VERSION" ] || fail "--version mismatch: $CLI_VERSION != $PKG_VERSION"
+HELP="$($CLI --help)"
+for word in init build check lint list --force --prune --strict --format; do
+  echo "$HELP" | grep -q -- "$word" || fail "--help missing $word"
+done
+echo "[smoke] --help/--version ok ($CLI_VERSION)"
+
+# 3. Usage errors exit 2 (distinct from drift's 1).
+set +e
+$CLI deploy >/dev/null 2>&1; [ $? -eq 2 ] || { set -e; fail "unknown command should exit 2"; }
+$CLI check --force >/dev/null 2>&1; [ $? -eq 2 ] || { set -e; fail "misplaced flag should exit 2"; }
+set -e
+echo "[smoke] usage errors ok (exit 2)"
+
+# 4. init scaffolds a brand-new repo and is idempotent.
+mkdir -p "$WORKDIR/fresh"
+$CLI init -C "$WORKDIR/fresh" >/dev/null || fail "init failed"
+[ -f "$WORKDIR/fresh/rulecast.json" ] || fail "init did not create rulecast.json"
+[ -f "$WORKDIR/fresh/.rulecast/00-project.md" ] || fail "init did not create the first fragment"
+$CLI init -C "$WORKDIR/fresh" | grep -q "nothing to do" || fail "second init should be a no-op"
+echo "[smoke] init ok"
+
+# 5. Compile the bundled example: 5 fragments -> 14 files across 4 tools.
+cp -r "$ROOT/examples/polyglot/." "$WORKDIR/repo/"
+REPO="$WORKDIR/repo"
+BUILD_OUT="$($CLI build -C "$REPO")" || fail "build failed on the example repo"
+echo "$BUILD_OUT" | grep -q "built 14 files for 4 targets from 5 fragments: 14 written" \
+  || fail "build summary wrong: $BUILD_OUT"
+for f in CLAUDE.md AGENTS.md packages/web/CLAUDE.md services/api/AGENTS.md \
+         .cursor/rules/web-typescript.mdc .github/copilot-instructions.md \
+         .github/instructions/sql-style.instructions.md; do
+  [ -f "$REPO/$f" ] || fail "expected output missing: $f"
+done
+grep -q '> Applies to files matching `\*\*/\*.sql`.' "$REPO/CLAUDE.md" || fail "suffix-scope note missing"
+grep -q 'globs: packages/web/\*\*' "$REPO/.cursor/rules/web-typescript.mdc" || fail "cursor globs missing"
+grep -q 'applyTo: "services/api/\*\*"' "$REPO/.github/instructions/api-go.instructions.md" || fail "copilot applyTo missing"
+grep -q 'Review checklist' "$REPO/CLAUDE.md" || fail "claude-only fragment missing from CLAUDE.md"
+grep -q 'Review checklist' "$REPO/AGENTS.md" && fail "claude-only fragment leaked into AGENTS.md"
+echo "[smoke] build ok (14 files, scopes mapped per dialect)"
+
+# 6. check is clean right after build, exit 0.
+$CLI check -C "$REPO" | grep -q "check: OK — 14 generated files in sync" || fail "check not clean after build"
+echo "[smoke] check clean ok"
+
+# 7. Hand-editing a generated file trips the drift gate, exit 1.
+echo "sneaky edit" >> "$REPO/CLAUDE.md"
+set +e
+CHECK_OUT="$($CLI check -C "$REPO")"; CHECK_CODE=$?
+set -e
+[ "$CHECK_CODE" -eq 1 ] || fail "stale check should exit 1, got $CHECK_CODE"
+echo "$CHECK_OUT" | grep -q "stale" || fail "stale finding missing: $CHECK_OUT"
+$CLI build -C "$REPO" >/dev/null
+$CLI check -C "$REPO" >/dev/null || fail "rebuild should restore sync"
+echo "[smoke] drift detection ok (stale -> rebuild -> clean)"
+
+# 8. Deleting a fragment orphans its outputs; --prune removes them.
+rm "$REPO/.rulecast/sql-style.md"
+set +e
+ORPHAN_OUT="$($CLI check -C "$REPO")"; ORPHAN_CODE=$?
+set -e
+[ "$ORPHAN_CODE" -eq 1 ] || fail "orphan check should exit 1"
+echo "$ORPHAN_OUT" | grep -q "orphaned" || fail "orphan finding missing: $ORPHAN_OUT"
+$CLI build -C "$REPO" --prune | grep -q "pruned" || fail "--prune reported nothing"
+[ ! -f "$REPO/.cursor/rules/sql-style.mdc" ] || fail "orphan .mdc not pruned"
+$CLI check -C "$REPO" >/dev/null || fail "check should be clean after prune"
+echo "[smoke] orphan pruning ok"
+
+# 9. A hand-written CLAUDE.md is protected: exit 2 without --force.
+mkdir -p "$WORKDIR/guarded/.rulecast"
+printf -- '---\ntitle: Rules\n---\n\n- rule\n' > "$WORKDIR/guarded/.rulecast/rules.md"
+printf '# Hand-written notes\n' > "$WORKDIR/guarded/CLAUDE.md"
+set +e
+$CLI build -C "$WORKDIR/guarded" >/dev/null 2>&1; GUARD_CODE=$?
+set -e
+[ "$GUARD_CODE" -eq 2 ] || fail "unmanaged overwrite should exit 2, got $GUARD_CODE"
+grep -q "Hand-written notes" "$WORKDIR/guarded/CLAUDE.md" || fail "hand-written file was modified"
+$CLI build -C "$WORKDIR/guarded" --force >/dev/null || fail "--force build failed"
+grep -q "Generated by rulecast" "$WORKDIR/guarded/CLAUDE.md" || fail "--force did not take over the file"
+echo "[smoke] unmanaged-file guard ok"
+
+# 10. lint catches a broken fragment with codes; build refuses to run.
+printf -- '---\ntargets: [claude, vscode]\n---\n\n- body\n' > "$REPO/.rulecast/bad.md"
+set +e
+LINT_OUT="$($CLI lint -C "$REPO")"; LINT_CODE=$?
+$CLI build -C "$REPO" >/dev/null 2>&1; BUILD_CODE=$?
+set -e
+[ "$LINT_CODE" -eq 1 ] || fail "lint should exit 1 on errors"
+echo "$LINT_OUT" | grep -q "error L101" || fail "lint missing L101"
+echo "$LINT_OUT" | grep -q 'error L103  unknown target "vscode"' || fail "lint missing L103"
+[ "$BUILD_CODE" -eq 2 ] || fail "build with lint errors should exit 2, got $BUILD_CODE"
+rm "$REPO/.rulecast/bad.md"
+echo "[smoke] lint gate ok"
+
+# 11. JSON output is valid and machine-shaped.
+$CLI check -C "$REPO" --format json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);if(typeof r.clean!=='boolean'||!Array.isArray(r.findings))throw new Error('bad shape')})" \
+  || fail "check --format json is not the documented shape"
+$CLI list -C "$REPO" --format json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{const r=JSON.parse(s);if(r.fragments.length!==4)throw new Error('want 4 fragments, got '+r.fragments.length)})" \
+  || fail "list --format json wrong"
+echo "[smoke] JSON output ok"
+
+# 12. Determinism: two builds from the same sources are byte-identical.
+cp -r "$ROOT/examples/polyglot/." "$WORKDIR/repo2/"
+$CLI build -C "$WORKDIR/repo2" >/dev/null
+cp -r "$ROOT/examples/polyglot/." "$WORKDIR/repo3/"
+$CLI build -C "$WORKDIR/repo3" >/dev/null
+diff -r "$WORKDIR/repo2" "$WORKDIR/repo3" >/dev/null || fail "repeat builds differ"
+echo "[smoke] determinism ok"
+
+echo "SMOKE OK"

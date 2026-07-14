@@ -1,0 +1,4 @@
+{
+  "source": ".rulecast",
+  "targets": ["claude", "agents", "cursor", "copilot"]
+}
