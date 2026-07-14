@@ -2,7 +2,7 @@
   "name": "rulecast",
   "version": "0.1.0",
   "description": "Compile CLAUDE.md, AGENTS.md, Cursor rules and Copilot instructions from one set of path-scoped fragments — with a lint pass and a CI drift check, not one-way file copying.",
-  "author": "JaydenCJ",
+  "author": "JaydenCJ <aisingioro.kiyon@gmail.com>",
   "license": "MIT",
   "type": "module",
   "bin": {
